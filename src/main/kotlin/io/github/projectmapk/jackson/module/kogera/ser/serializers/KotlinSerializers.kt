@@ -1,14 +1,14 @@
 package io.github.projectmapk.jackson.module.kogera.ser.serializers
 
+import com.fasterxml.jackson.annotation.JsonTypeInfo
 import com.fasterxml.jackson.annotation.JsonValue
 import com.fasterxml.jackson.core.JsonGenerator
-import com.fasterxml.jackson.databind.BeanDescription
-import com.fasterxml.jackson.databind.JavaType
-import com.fasterxml.jackson.databind.JsonSerializer
-import com.fasterxml.jackson.databind.SerializationConfig
-import com.fasterxml.jackson.databind.SerializerProvider
+import com.fasterxml.jackson.databind.*
+import com.fasterxml.jackson.databind.jsontype.TypeSerializer
 import com.fasterxml.jackson.databind.module.SimpleSerializers
+import com.fasterxml.jackson.databind.ser.std.StdDelegatingSerializer
 import com.fasterxml.jackson.databind.ser.std.StdSerializer
+import com.fasterxml.jackson.databind.type.ClassKey
 import io.github.projectmapk.jackson.module.kogera.ReflectionCache
 import io.github.projectmapk.jackson.module.kogera.ValueClassUnboxConverter
 import io.github.projectmapk.jackson.module.kogera.isUnboxableValueClass
@@ -75,13 +75,42 @@ internal class ValueClassStaticJsonValueSerializer<T : Any>(
     }
 }
 
+internal class PolymporphicValueClassSerializer(
+    private val rawClass: Class<*>,
+    private val delegate: StdDelegatingSerializer
+) :
+    JsonSerializer<Any>() {
+    override fun serialize(value: Any, gen: JsonGenerator, serializers: SerializerProvider) {
+        gen.writeStartArray()
+        gen.writeString(rawClass.simpleName)
+        delegate.serialize(value, gen, serializers)
+        gen.writeEndArray()
+    }
+
+    override fun serializeWithType(
+        value: Any,
+        gen: JsonGenerator,
+        serializers: SerializerProvider,
+        typeSer: TypeSerializer
+    ) {
+        gen.writeStartArray()
+        gen.writeString(rawClass.simpleName)
+        delegate.serialize(value, gen, serializers)
+        gen.writeEndArray()
+    }
+}
+
 internal class KotlinSerializers(private val cache: ReflectionCache) : SimpleSerializers() {
+
+    private val polymorphicValueClassSerializers = mutableMapOf<ClassKey, PolymporphicValueClassSerializer>()
+
     override fun findSerializer(
         config: SerializationConfig?,
         type: JavaType,
         beanDesc: BeanDescription?
     ): JsonSerializer<*>? {
         val rawClass = type.rawClass
+        val key = ClassKey(rawClass)
 
         return when {
             UByte::class.java == rawClass -> UByteSerializer
@@ -91,9 +120,26 @@ internal class KotlinSerializers(private val cache: ReflectionCache) : SimpleSer
             // The priority of Unboxing needs to be lowered so as not to break the serialization of Unsigned Integers.
             rawClass.isUnboxableValueClass() -> {
                 val unboxConverter = cache.getValueClassUnboxConverter(rawClass)
-                ValueClassStaticJsonValueSerializer.createOrNull(unboxConverter) ?: unboxConverter.delegatingSerializer
+                var serializer = ValueClassStaticJsonValueSerializer.createOrNull(unboxConverter)
+
+                if (serializer != null) {
+                    return serializer
+                }
+                serializer = unboxConverter.delegatingSerializer
+                if (rawClass.interfaces.isEmpty() || !isPolymorphicJsonType(rawClass)) {
+                    return serializer
+                }
+                return polymorphicValueClassSerializers.getOrPut(key) {
+                    PolymporphicValueClassSerializer(rawClass, serializer)
+                }
             }
+
             else -> null
         }
+    }
+
+    private fun isPolymorphicJsonType(rawClass: Class<*>): Boolean {
+        return rawClass.annotations.any { it is JsonTypeInfo }
+                || rawClass.interfaces.any { isPolymorphicJsonType(it) }
     }
 }
