@@ -20,4 +20,15 @@ class InheritanceTest {
         assertEquals(value, result)
     }
 
+    @Test
+    fun `array polymorphism should be used with polymorphic value class attributes`(){
+        val value = WrappedValueClass(ValueClass(1))
+
+        val json = mapper.writeValueAsString(value)
+        val result = mapper.readValue(json, WrappedValueClass::class.java)
+
+        assertEquals(value, result)
+    }
 }
+
+data class WrappedValueClass(val value: ValueClass)
